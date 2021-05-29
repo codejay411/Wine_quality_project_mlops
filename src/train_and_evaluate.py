@@ -1,7 +1,6 @@
 # load the train and test
-# train algorithms
-# save the metrices and params 
-
+# train algo
+# save the metrices, params
 import os
 import warnings
 import sys
@@ -11,11 +10,13 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import ElasticNet
 from get_data import read_params
+from urllib.parse import urlparse
 import argparse
 import joblib
 import json
+import mlflow
 
-def eval_matrics(actual, pred):
+def eval_metrics(actual, pred):
     rmse = np.sqrt(mean_squared_error(actual, pred))
     mae = mean_absolute_error(actual, pred)
     r2 = r2_score(actual, pred)
@@ -31,10 +32,10 @@ def train_and_evaluate(config_path):
     alpha = config["estimators"]["ElasticNet"]["params"]["alpha"]
     l1_ratio = config["estimators"]["ElasticNet"]["params"]["l1_ratio"]
 
-    target = config["base"]["target_col"]
+    target = [config["base"]["target_col"]]
 
-    train = pd.read_csv(train_data_path)
-    test = pd.read_csv(test_data_path)
+    train = pd.read_csv(train_data_path, sep=",")
+    test = pd.read_csv(test_data_path, sep=",")
 
     train_y = train[target]
     test_y = test[target]
@@ -42,45 +43,45 @@ def train_and_evaluate(config_path):
     train_x = train.drop(target, axis=1)
     test_x = test.drop(target, axis=1)
 
-    lr = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=random_state)
-    lr.fit(train_x, train_y)
+################### MLFLOW ###############################
+    mlflow_config = config["mlflow_config"]
+    remote_server_uri = mlflow_config["remote_server_uri"]
 
-    predicted_qualities = lr.predict(test_x)
-    (rmse, mae, r2) = eval_matrics(test_y, predicted_qualities)
+    mlflow.set_tracking_uri(remote_server_uri)
 
-    print("Elasticnet model (alpha=%f, l1_ratio=%f):" % (alpha, l1_ratio))
-    print("  RMSE: %s" % rmse)
-    print("  MAE: %s" % mae)
-    print("  R2: %s" % r2)
+    mlflow.set_experiment(mlflow_config["experiment_name"])
 
-    # ----------------------------
-    scores_file = config["reports"]["scores"]
-    params_file = config["reports"]["params"]
+    with mlflow.start_run(run_name=mlflow_config["run_name"]) as mlops_run:
+        lr = ElasticNet(
+            alpha=alpha, 
+            l1_ratio=l1_ratio, 
+            random_state=random_state)
+        lr.fit(train_x, train_y)
 
-    with open(scores_file, "w") as f:
-        scores = {
-            "rmse": rmse,
-            "mae": mae,
-            "r2": r2
-        }
-        json.dump(scores, f, indent=4)
+        predicted_qualities = lr.predict(test_x)
+        
+        (rmse, mae, r2) = eval_metrics(test_y, predicted_qualities)
 
-    with open(params_file, "w") as f:
-        params = {
-            "alpha": alpha,
-            "l1_ratio": l1_ratio,
-        }
-        json.dump(params, f, indent=4)
-    
-    # ---------------------------------
+        mlflow.log_param("alpha", alpha)
+        mlflow.log_param("l1_ratio", l1_ratio)
+
+        mlflow.log_metric("rmse", rmse)
+        mlflow.log_metric("mae", mae)
+        mlflow.log_metric("r2", r2)
+
+        tracking_url_type_store = urlparse(mlflow.get_artifact_uri()).scheme
+
+        if tracking_url_type_store != "file":
+            mlflow.sklearn.log_model(
+                lr, 
+                "model", 
+                registered_model_name=mlflow_config["registered_model_name"])
+        else:
+            mlflow.sklearn.load_model(lr, "model")
+ 
 
 
-    os.makedirs(model_dir, exist_ok=True)
-    model_path = os.path.join(model_dir, "model.joblib")
-
-    joblib.dump(lr, model_path)
-
-if __name__ =="__main__":
+if __name__=="__main__":
     args = argparse.ArgumentParser()
     args.add_argument("--config", default="params.yaml")
     parsed_args = args.parse_args()
